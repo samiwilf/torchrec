@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3..
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -10,7 +10,7 @@ import itertools
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import cast, Iterator, List, Optional, Tuple
+from typing import cast, Iterator, List, Optional, Tuple, Dict, Any
 
 import torch
 import torchmetrics as metrics
@@ -23,6 +23,11 @@ from torchrec.datasets.criteo import (
     DEFAULT_INT_NAMES,
     TOTAL_TRAINING_SAMPLES,
 )
+
+import numpy
+numpy.random.seed(0)
+torch.manual_seed(0)
+
 from torchrec.datasets.utils import Batch
 from torchrec.distributed import TrainPipelineSparseDist
 from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
@@ -57,6 +62,60 @@ except ImportError:
 
 TRAIN_PIPELINE_STAGES = 3  # Number of stages in TrainPipelineSparseDist.
 
+from torchrec.distributed.embedding_types import EmbeddingComputeKernel
+from torchrec.distributed.embeddingbag import EmbeddingBagCollectionSharder
+from torchrec.distributed.types import ModuleSharder, ShardingType
+import torch.nn as nn
+
+class TestEBCSharder(EmbeddingBagCollectionSharder):
+    def __init__(
+        self,
+        #sharding_type: str,
+        #kernel_type: str,
+        fused_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if fused_params is None:
+            fused_params = {}
+        # self._sharding_type = sharding_type
+        # self._kernel_type = kernel_type
+        self._fused_params = fused_params
+        if True:
+            self._sharding_type = [
+                #ShardingType.DATA_PARALLEL.value,
+                ShardingType.TABLE_WISE.value,
+                #ShardingType.COLUMN_WISE.value,
+                #ShardingType.ROW_WISE.value,
+                #ShardingType.TABLE_ROW_WISE.value,
+                #ShardingType.TABLE_COLUMN_WISE.value,
+                ]
+            self._kernel_type = [
+                #EmbeddingComputeKernel.DENSE.value,
+                EmbeddingComputeKernel.SPARSE.value,
+                #EmbeddingComputeKernel.BATCHED_DENSE.value,
+                #EmbeddingComputeKernel.BATCHED_FUSED.value,
+                #EmbeddingComputeKernel.BATCHED_FUSED_UVM.value,
+                #EmbeddingComputeKernel.BATCHED_FUSED_UVM_CACHING.value,
+                #EmbeddingComputeKernel.BATCHED_QUANT.value,
+            ]
+    """
+    Restricts sharding to single type only.
+    """
+
+    def sharding_types(self, compute_device_type: str) -> List[str]:
+        return self._sharding_type
+
+    """
+    Restricts to single impl.
+    """
+
+    def compute_kernels(
+        self, sharding_type: str, compute_device_type: str
+    ) -> List[str]:
+        return self._kernel_type
+
+    @property
+    def fused_params(self) -> Optional[Dict[str, Any]]:
+        return self._fused_params
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="torchrec dlrm example trainer")
@@ -239,6 +298,7 @@ def _evaluate(
     if limit_batches is not None:
         eval_iter = itertools.islice(eval_iter, limit_batches)
 
+
     auroc = metrics.AUROC(compute_on_step=False).to(device)
     accuracy = metrics.Accuracy(compute_on_step=False).to(device)
 
@@ -290,9 +350,7 @@ def _train(
 
     samples_per_trainer = TOTAL_TRAINING_SAMPLES / dist.get_world_size() * args.epochs
 
-    for it in tqdm(
-        itertools.count(), mininterval=args.print_freq, desc=f"Epoch {epoch}"
-    ):
+    for it in tqdm(itertools.count(), mininterval=args.print_freq, desc=f"Epoch {epoch}"):
         try:
             if not train_pipeline._model.training:
                 raise ValueError("Model must be in training mode to train.")
@@ -361,7 +419,9 @@ def train_val_test(
     train_iter = iter(train_dataloader)
     for epoch in range(args.epochs):
         val_iter = iter(val_dataloader)
-        _train(args, train_pipeline, train_iter, val_dataloader, epoch)
+        _train(
+            args, train_pipeline, train_iter, val_dataloader, epoch
+        )
         train_iter = iter(train_dataloader)
         val_accuracy, val_auroc = _evaluate(
             args.print_freq,
@@ -404,6 +464,7 @@ def main(argv: List[str]) -> None:
     Returns:
         None.
     """
+    argv = ['--pin_memory', '--batch_size', '2048', '--epochs', '1', '--num_embeddings_per_feature', '45833188,36746,17245,7413,20243,3,7114,1441,62,29275261,1572176,345138,10,2209,11267,128,4,974,14,48937457,11316796,40094537,452104,12606,104,35', '--embedding_dim', '128', '--dense_arch_layer_sizes', '512,256,128', '--over_arch_layer_sizes', '1024,1024,512,256,1', '--in_memory_binary_criteo_path', '/home/ubuntu/mountpoint/1tb_numpy', '--learning_rate', '15.0', '--mmap_mode']
     args = parse_args(argv)
 
     rank = int(os.environ["LOCAL_RANK"])
@@ -465,14 +526,18 @@ def main(argv: List[str]) -> None:
     fused_params = {
         "learning_rate": args.learning_rate,
     }
-    sharders = [
-        EmbeddingBagCollectionSharder(fused_params=fused_params),
-    ]
-
+    sharders = TestEBCSharder(
+                    fused_params=fused_params,
+                )
     model = DistributedModelParallel(
         module=train_model,
         device=device,
-        sharders=cast(List[ModuleSharder[nn.Module]], sharders),
+        sharders=[
+            cast(
+                ModuleSharder[torch.nn.Module],
+                sharders,
+            )
+        ],
     )
     dense_optimizer = KeyedOptimizerWrapper(
         dict(model.named_parameters()),
