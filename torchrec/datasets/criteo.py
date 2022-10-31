@@ -820,7 +820,7 @@ class InMemoryBinaryCriteoIterDataPipe(IterableDataset):
             offset_per_key = [batch_size * i for i in range(CAT_FEATURE_COUNT + 1)]
 
         return Batch(
-            dense_features=torch.from_numpy(dense),
+            dense_features=torch.from_numpy(dense.copy()),
             sparse_features=KeyedJaggedTensor(
                 keys=self.keys,
                 # transpose + reshape(-1) incurs an additional copy.
@@ -832,7 +832,7 @@ class InMemoryBinaryCriteoIterDataPipe(IterableDataset):
                 offset_per_key=offset_per_key,
                 index_per_key=self.index_per_key,
             ),
-            labels=torch.from_numpy(labels.reshape(-1)),
+            labels=torch.from_numpy(labels.reshape(-1).copy()),
         )
 
     def __iter__(self) -> Iterator[Batch]:
